@@ -1,0 +1,553 @@
+---
+title: "Report -- Prediction of happiness"
+author: "Lucie Schaynová"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    number_sections: yes
+    extra_dependencies: float
+    toc: yes
+    toc_depth: 2
+  word_document:
+    toc: yes
+    toc_depth: '2'
+---
+
+```{r setup, include=FALSE}
+if (!require("dplyr")) install.packages("dplyr")
+library("dplyr")
+if (!require(ggplot2)) install.packages('ggplot2')
+library(ggplot2)
+if (!require(caret)) install.packages('caret')
+library(caret)
+if (!require(corrplot)) install.packages('corrplot')
+library(corrplot)
+if (!require(gridExtra)) install.packages('gridExtra')
+library(gridExtra)
+if (!require(knitr)) install.packages('knitr')
+library(knitr)
+if (!require(magrittr)) install.packages('magrittr')
+library(magrittr)
+# Load data
+data <- read.csv("world-happiness-report-2021.csv")
+# Exclude columns which are not described in documentation
+data <- data %>% select(-Standard.error.of.ladder.score, -upperwhisker, -lowerwhisker, -Dystopia...residual)
+# Exclude columns which recalculate data from other columns
+data <- data %>% select(-Explained.by..Log.GDP.per.capita, -Explained.by..Social.support, -Explained.by..Healthy.life.expectancy, -Explained.by..Freedom.to.make.life.choices, -Explained.by..Generosity, -Explained.by..Perceptions.of.corruption, -Ladder.score.in.Dystopia)
+# Rename the column ï..Country.name to Country.name
+names(data)[1] <- "Country.name" 
+```
+
+\clearpage
+
+# Introduction
+
+Machine learning is about creating and using models. Our goal is to use existing data to develop models that we can use to predict various outcomes for new data. Depending on the type of data, prediction can be accomplished through classification models, random forest, k-nearest neighbors or many other machine learning algorithms.
+
+Our data set used in this project contains data that can be found here: \url{ https://www.kaggle.com/ajaypalsinghlo/world-happiness-report-2021?select=world-happiness-report-2021.csv}
+
+```{r data, echo=FALSE, warning = FALSE, error=FALSE}
+str(data)
+```
+Our data set contains `r nrow(data)` observations (rows) and `r ncol(data)` variables (columns).
+
+`Country.name` or `Regional.indicator` mean country or region, respectively, of respondents. `Ladder.score` is our predicted variable and means happiness score or subjective well-being. The top of the ladder (number 10) represents the best possible life and the bottom of the ladder (number 0) represents the worst possible life. `Logged.GDP.per.capita` are statistics of GDP per capita in purchasing power parity at constant international dollar prices. `Social.support` is the national average of the binary responses (either 0 or 1). The question for respondents was: "If you were in trouble, do you have relatives or friends you can count on to help you whenever you need them, or not?" Data in the column `Healthy.life.expectancy` were extracted from the World Health Organization's Global Health Observatory data repository. Each row of `Freedom.to.make.life.choices` means the national average of responses to the question: "Are you satisfied or dissatisfied with your freedom to choose what you do with your life?" `Generosity` is the residual of regressing national average of response to the question: "Have you donated money to a charity in the past month?" The `Perceptions.of.corruption` is the average of the survey responses to two questions: "Is corruption widespread throughout the government or not" and "Is corruption widespread withing businesses or not?" 
+
+
+# Data analysis
+
+```{r data preparation, echo=FALSE, warning = FALSE}
+# Replace all NA
+data[is.na(data)] <- 0
+
+# Divide to train and test data set
+set.seed(3)
+indexes <- createDataPartition(data$Ladder.score, times = 1, 0.2, list = FALSE)
+train_data <- data %>% slice(-indexes)
+test_data <- data %>% slice(indexes)
+```
+
+
+
+```{r summary, echo=FALSE, warning = FALSE}
+train_data %>%  summary()
+```
+We can look at average `Ladder.score` per `Regional.indicator`:
+
+```{r countries, echo=FALSE, warning = FALSE}
+countries <- train_data %>% select(Regional.indicator,Ladder.score) %>% group_by(Regional.indicator) %>% summarize(Average.score = mean(Ladder.score)) %>% arrange(is.na(Average.score), Average.score)
+countries
+```
+
+We can see that the highest average happiness is in North America and ANZ, the lowest is in South Africa.
+
+```{r low_states, echo=FALSE, warning = FALSE}
+low_states <- train_data %>% select(Country.name,Ladder.score) 
+tail(low_states,3)
+```
+```{r high_states, echo=FALSE, warning = FALSE}
+high_states <- train_data %>% select(Country.name,Ladder.score) 
+head(high_states,3)
+```
+Particularly, the highest happiness is in Finland, the lowest in Afghanistan.
+
+Determining the correlation of each factor to each other is our utmost interest now. According to the correlation, we can discuss which of the factors may have influence on our forecast. We can prefer the variables with higher correlation and include them into our models. We will not take into account variables with low correlation. As `Country.name` and `Regional.indicator` are not numeric, we need to exclude them from correlation. At the moment, all the remaining variables are potential predictors of `Ladder.score`. 
+
+```{r correlation, echo=FALSE, warning=FALSE, message=FALSE, fig.cap = "Correlation between variables", fig.align='center', out.width = "100%", fig.pos='H'}
+correlation_matrix <- train_data %>% 
+  select(-Country.name, -Regional.indicator) %>%cor()
+corrplot(correlation_matrix, type = "upper", tl.col = "black", method = "circle", cl.ratio = 0.3, tl.cex = 0.6, tl.srt = 70)
+```
+
+We can see that all factors are at least somewhat correlated. The strongest positive correlation with `Ladder.score` has `Logged.GDP.per.capita`, `Social.support`, `Healthy.life.expectancy`, and  `Freedom.to.make.life.choices`. Negative correlation is with `Perceptions.of.corruption`.
+
+There is also positive correlation between `Logged.GDP.per.capita` and `Healthy.life.expectancy`. 
+
+The relationships between specific variables can be visualized by plotting them and determining the line of the best fit.
+
+```{r plots, echo=FALSE, warning=FALSE, message=FALSE, fig.cap = "Ladder.score relation with the rest of variables", fig.align='center', out.width = "90%", fig.pos='H'}
+GDP_plot <- train_data %>% ggplot(aes(Logged.GDP.per.capita,Ladder.score))+
+  geom_point(color = "purple1") + 
+  geom_smooth(color = "purple3") +
+  xlab("Logged GDP per capita") + 
+  ylab("Ladder score") + 
+  ggtitle("Ladder score by GDP")
+
+Social_plot <- train_data %>% ggplot(aes(Social.support,Ladder.score))+
+  geom_point(color = "red1") + 
+  geom_smooth(color = "red3") +
+  xlab("Social support") + 
+  ylab("Ladder score") + 
+  ggtitle("Ladder score by Social support")
+
+Healthy_plot <- train_data %>% ggplot(aes(Healthy.life.expectancy,Ladder.score))+
+  geom_point(color = "orchid1") + 
+  geom_smooth(color = "orchid3") +
+  xlab("Healthy life expectancy") + 
+  ylab("Ladder score") + 
+  ggtitle("Ladder score by Life expectancy")
+
+Freedom_plot <- train_data %>% ggplot(aes(Freedom.to.make.life.choices,Ladder.score))+
+ geom_point(color = "green1") + 
+  geom_smooth(color = "green3") +
+  xlab("Freedom to make life choices") + 
+  ylab("Ladder score") + 
+  ggtitle("Ladder score by Freedom")
+
+Generosity_plot <- train_data %>% ggplot(aes(Generosity,Ladder.score))+
+  geom_point(color = "blue1") + 
+  geom_smooth(color = "blue3") +
+  xlab("Generosity") + 
+  ylab("Ladder score") + 
+  ggtitle("Ladder score by Generosity")
+
+Corruption_plot <- train_data %>% ggplot(aes(Perceptions.of.corruption,Ladder.score))+
+  geom_point(color = "orange1") + 
+  geom_smooth(color = "orange3") +
+  xlab("Perceptions of corruption") + 
+  ylab("Ladder score") + 
+  ggtitle("Ladder score by Corruption")
+
+grid.arrange(GDP_plot, Social_plot, Healthy_plot, Freedom_plot, Generosity_plot, Corruption_plot)
+```
+
+The plot of Ladder score by GDP clearly shows a positive correlation: when GDP increases, Ladder score also increases. Negative correlation can be seen between Corruption and Ladder score. 
+
+# Machine learning methods
+
+In this section, we will use some machine learning methods and focus on their performance on our data set. Based on the performance, we will choose the best method for prediction. 
+
+There are many methods we can use, hovewer, we will use Multivariate regression (\textbf{MVR}), k-nearest neighbors (\textbf{KNN}), Neural networks (\textbf{NN}), and Generalized linear model (\textbf{GLM}). The question is: which one is the best to provide the most accurate predictions? We will allow cross-validation across all the models and observe their average performance. Our steps will be as follows:
+\begin{itemize}
+\item Divide original data to training (80 \%) and testing (20 \%) data set.
+\item Use training data to train all models 5 times using cross-validation.
+\item Calculate average RMSE for each method.
+\item Use the method with the lowest RMSE on original testing data, validate and calculate RMSE.
+\end{itemize}
+
+\newpage
+
+## Multivariate Regression (MVR)
+
+We will try to find all of the features that have influence on happiness (`Ladder.score`). Let us add features one by one and observe how RMSE, Multiple R-squared values (or Adjusted R-squared) and p-values change. We start with `Logged.GDP.per.capita` feature.
+
+```{r remove_columns, echo=FALSE, warning = FALSE}
+# we do not need countries columns for training
+train_data <- train_data %>% select(-Country.name, -Regional.indicator)
+```
+
+```{r prepare_cross_validation, echo=FALSE, warning = FALSE}
+# cut number of rows into 5 intervals
+folds <- cut(seq(1, nrow(train_data)), breaks = 5, labels = FALSE)
+```
+
+
+```{r linear_regression_11, echo=FALSE, warning = FALSE}
+# RMSE in each iteration 
+RMSEs_11 <- c()
+minimal_RMSE <- 1000000
+for (i in 1:5){
+  indexes <- which(folds == i, arr.ind = TRUE)
+  new_train_data_11 <- train_data[-indexes, ]
+  new_test_data_11 <- train_data[indexes, ]
+  linear_model_11 <- lm(Ladder.score ~ Logged.GDP.per.capita, data = new_train_data_11)
+  prediction_11 <- predict(linear_model_11, new_test_data_11)
+  current_RMSE <- sqrt(mean((new_test_data_11$Ladder.score - prediction_11)^2) )
+  # we need to identify and show the best model from the 5 runs
+  if (current_RMSE < minimal_RMSE){
+    minimal_RMSE <- current_RMSE
+    best_model_11 <- linear_model_11
+  }
+  RMSEs_11 <- c(RMSEs_11, current_RMSE)
+}
+message('average RMSE:')
+mean(RMSEs_11)
+message("Coefficients of the best model:")
+summary(best_model_11)$coefficients
+message("Multiple R-squared:") 
+summary(best_model_11)$r.squared
+```
+
+Now we will add `Social.support` feature:
+
+```{r linear_regression_12, echo=FALSE, warning = FALSE}
+RMSEs_12 <- c()
+minimal_RMSE <- 1000000
+for (i in 1:5){
+  indexes <- which(folds == i, arr.ind = TRUE)
+  new_train_data_12 <- train_data[-indexes, ]
+  new_test_data_12 <- train_data[indexes, ]
+  linear_model_12 <- lm(Ladder.score ~ Logged.GDP.per.capita + Social.support, data = new_train_data_12)
+  prediction_12 <- predict(linear_model_12, new_test_data_12)
+  current_RMSE <- sqrt(mean((new_test_data_12$Ladder.score - prediction_12)^2) )
+  if (current_RMSE < minimal_RMSE){
+    minimal_RMSE <- current_RMSE
+    best_model_12 <- linear_model_12
+  }
+  RMSEs_12 <- c(RMSEs_12, current_RMSE)
+}
+message('average RMSE:')
+mean(RMSEs_12)
+message("Coefficients of the best model:")
+summary(best_model_12)$coefficients
+message("Multiple R-squared:")
+summary(best_model_12)$r.squared
+```
+We can see that RMSE decreased and multiple R-squared slightly increased. p-values are below 0.05 which is statistically significant. Let us add `Healthy.life.expectancy` feature:
+
+```{r linear_regression_13, echo=FALSE, warning = FALSE}
+RMSEs_13 <- c()
+minimal_RMSE <- 1000000
+for (i in 1:5){
+  indexes <- which(folds == i, arr.ind = TRUE)
+  new_train_data_13 <- train_data[-indexes, ]
+  new_test_data_13 <- train_data[indexes, ]
+  linear_model_13 <- lm(Ladder.score ~ Logged.GDP.per.capita + Social.support +  Healthy.life.expectancy, data = new_train_data_13)
+  prediction_13 <- predict(linear_model_13, new_test_data_13)
+  current_RMSE <- sqrt(mean((new_test_data_13$Ladder.score - prediction_13)^2) )
+  if (current_RMSE < minimal_RMSE){
+    minimal_RMSE <- current_RMSE
+    best_model_13 <- linear_model_13
+  }
+  RMSEs_13 <- c(RMSEs_13, current_RMSE)
+}
+message("average RMSE:")
+mean(RMSEs_13)
+message("Coefficients of the best model:")
+summary(best_model_13)$coefficients
+message("Multiple R-squared:")
+summary(best_model_13)$r.squared
+```
+R-squared slightly increased and also RMSE. p-values are still statistically significant. Now we add `Freedom.to.make.life.choices` feature: 
+
+```{r linear_regression_14, echo=FALSE, warning = FALSE}
+RMSEs_14 <- c()
+minimal_RMSE <- 1000000
+for (i in 1:5){
+  indexes <- which(folds == i, arr.ind = TRUE)
+  new_train_data_14 <- train_data[-indexes, ]
+  new_test_data_14 <- train_data[indexes, ]
+  linear_model_14 <- lm(Ladder.score ~ Logged.GDP.per.capita + Social.support + Healthy.life.expectancy + Freedom.to.make.life.choices, data = new_train_data_14)
+  prediction_14 <- predict(linear_model_14, new_test_data_14)
+  current_RMSE <- sqrt(mean((new_test_data_14$Ladder.score - prediction_14)^2) )
+  if (current_RMSE < minimal_RMSE){
+    minimal_RMSE <- current_RMSE
+    best_model_14 <- linear_model_14
+  }
+  RMSEs_14 <- c(RMSEs_14, current_RMSE)
+}
+message("average RMSE:")
+mean(RMSEs_14)
+message("Coefficients of the best model:")
+summary(best_model_14)$coefficients
+message("Multiple R-squared:")
+summary(best_model_14)$r.squared
+```
+Add `Generosity` feature:
+
+```{r linear_regression_15, echo=FALSE, warning = FALSE}
+RMSEs_15 <- c()
+minimal_RMSE <- 1000000
+for (i in 1:5){
+  indexes <- which(folds == i, arr.ind = TRUE)
+  new_train_data_15 <- train_data[-indexes, ]
+  new_test_data_15 <- train_data[indexes, ]
+  linear_model_15 <- lm(Ladder.score ~ Logged.GDP.per.capita + Social.support + Healthy.life.expectancy + Freedom.to.make.life.choices + Generosity, data = new_train_data_15)
+  prediction_15 <- predict(linear_model_15, new_test_data_15)
+  current_RMSE <- sqrt(mean((new_test_data_15$Ladder.score - prediction_15)^2) )
+  if (current_RMSE < minimal_RMSE){
+    minimal_RMSE <- current_RMSE
+    best_model_15 <- linear_model_15
+  }
+  RMSEs_15 <- c(RMSEs_15, current_RMSE)
+}
+message("average RMSE:")
+mean(RMSEs_15)
+message("Coefficients of the best model:")
+summary(best_model_15)$coefficients
+message("Multiple R-squared:")
+summary(best_model_15)$r.squared
+```
+`Perceptions.of.corruption` feature:
+
+
+```{r linear_regression_16, echo=FALSE, warning = FALSE}
+RMSEs_16 <- c()
+minimal_RMSE <- 1000000
+for (i in 1:5){
+  indexes <- which(folds == i, arr.ind = TRUE)
+  new_train_data_16 <- train_data[-indexes, ]
+  new_test_data_16 <- train_data[indexes, ]
+  linear_model_16 <- lm(Ladder.score ~ Logged.GDP.per.capita + Social.support + Healthy.life.expectancy + Freedom.to.make.life.choices + Generosity + Perceptions.of.corruption, data = new_train_data_16)
+  prediction_16 <- predict(linear_model_16, new_test_data_16)
+  current_RMSE <- sqrt(mean((new_test_data_16$Ladder.score - prediction_16)^2) )
+  if (current_RMSE < minimal_RMSE){
+    minimal_RMSE <- current_RMSE
+    best_model_16 <- linear_model_16
+  }
+  RMSEs_16 <- c(RMSEs_16, current_RMSE)
+}
+message('average RMSE:')
+mean(RMSEs_16)
+message("Coefficients of the best model:")
+summary(best_model_16)$coefficients
+message("Multiple R-squared:")
+summary(best_model_16)$r.squared
+```
+`Perceptions.of.corruption` feature increased Multiple R-squared and RMSE. Now we can observe that `Healthy.life.expectancy` and `Generosity` are not statistically significant (are greater than 0.05).
+
+Finally, the results below tell us that the happiness is tied more to the combined feature set of GDP, Social support, and Freedom to make life choices than to the Healthy life expectancy, Generosity and Corruption. We removed the Corruption feature because this gives us higher RMSE. We can look at results without the insignificant features:
+
+```{r linear_regression_17, echo=FALSE, warning = FALSE}
+RMSEs_17 <- c()
+minimal_RMSE <- 1000000
+for (i in 1:5){
+  indexes <- which(folds == i, arr.ind = TRUE)
+  new_train_data_17 <- train_data[-indexes, ]
+  new_test_data_17 <- train_data[indexes, ]
+  linear_model_17 <- lm(Ladder.score ~ Logged.GDP.per.capita + Social.support  + Freedom.to.make.life.choices, data = new_train_data_17)
+  prediction_17 <- predict(linear_model_17, new_test_data_17)
+  current_RMSE <- sqrt(mean((new_test_data_17$Ladder.score - prediction_17)^2) )
+  if (current_RMSE < minimal_RMSE){
+    minimal_RMSE <- current_RMSE
+    best_model_17 <- linear_model_17
+  }
+  RMSEs_17 <- c(RMSEs_17, current_RMSE)
+}
+message('average RMSE:')
+mean(RMSEs_17)
+message("Coefficients of the best model:")
+summary(best_model_17)$coefficients
+message("Multiple R-squared:")
+summary(best_model_17)$r.squared
+```
+The corresponding results have the lowest RMSE from all the observations. So our final linear equation can look like this:
+
+$$
+\text{Ladder.score} = -2.66 + 0.47 \text{ Logged.GDP.per.capita} + 2.15 \text{ Social.support} + 2.50 \text{ Freedom.to.make.life.choices}
+$$
+
+We tried to increase degree of polynomial in our model for each feature, but the results did not improve at all. 
+
+When we think about the feature `Healthy.life.expectancy`, one would expect that this feature will affect the happiness. But what we saw in computations is that it does not have any effect. The data were collected from 117 countries so respondents were from developing or industrially advanced countries, men or women, etc. This might have established some noise in data.   
+
+Now we use original testing data to test our best linear model, calculate RMSE, and visualize the results in plot of actual (black) and predicted (red) values.
+
+```{r linear_regression_results, echo=FALSE, warning = FALSE}
+new_column_1 <- predict(linear_model_17, test_data) 
+results <- data.frame(new_column_1)
+message("RMSE:")
+sqrt(mean((test_data$Ladder.score - new_column_1)^2))
+
+plot(test_data$Ladder.score, type="l")
+lines(results$new_column_1, col="red")
+```
+The RMSE tells us that our predicted values are 0.53 units far from observed (real) values on average.
+
+## k-Nearest Neighbors (KNN)
+
+Now we will use k-Nearest neighbors method. This method takes all available cases in our data into account and provides prediction based on distance measure. It takes a baseline of data and measure the distance between all the points. Then it compares other data with it. 
+
+We will run our model for 5 times using cross-validation.
+
+```{r knn, echo=FALSE, warning = FALSE} 
+RMSEs_21 <- c()
+minimal_RMSE <- 1000000
+for (i in 1:5){
+  indexes <- which(folds == i, arr.ind = TRUE)
+  new_train_data_21 <- train_data[-indexes, ]
+  new_test_data_21 <- train_data[indexes, ]
+  knn <- train(Ladder.score ~ Logged.GDP.per.capita + Social.support + 
+                            Freedom.to.make.life.choices ,
+                         data = new_train_data_21, method = "knn")
+  prediction_knn <- predict(knn, new_test_data_21) 
+  current_RMSE <- sqrt(mean((new_test_data_21$Ladder.score - prediction_knn)^2)) 
+  if (current_RMSE < minimal_RMSE){
+    minimal_RMSE <- current_RMSE
+    best_model_21 <- knn
+  }
+  RMSEs_21 <- c(RMSEs_21, current_RMSE)
+}
+message("average RMSE:")
+mean(RMSEs_21)
+``` 
+Now we can use original testing data to test our best linear model, calculate RMSE, and visualize the results in plot of actual and predicted values.
+
+```{r knn_results, echo=FALSE, warning = FALSE} 
+new_column_3 <- predict(best_model_21, test_data)
+results <- data.frame(new_column_3)
+message("RMSE:")
+sqrt(mean((test_data$Ladder.score - new_column_3)^2)) 
+
+#plot(knn)
+plot(test_data$Ladder.score, type="l") 
+lines(results$new_column_3, col="red") 
+``` 
+
+
+## Neural Networks (NN)
+
+
+A neural network is basically a set of equations. We use the equations to calculate an outcome. 
+
+```{r neural_networks, echo=FALSE, warning = FALSE}
+RMSEs_31 <- c()
+minimal_RMSE <- 1000000
+set.seed(123)
+for (i in 1:5){
+  indexes <- which(folds == i, arr.ind = TRUE)
+  new_train_data_31 <- train_data[-indexes, ]
+  new_test_data_31 <- train_data[indexes, ]
+  neural_networks <- train(Ladder.score ~ Logged.GDP.per.capita + Social.support + 
+                            Freedom.to.make.life.choices ,
+                         data = new_train_data_31, method = "nnet", maxit = 1000, 
+                        trace = FALSE, linout = 1)
+  prediction_31 <- predict(neural_networks, new_test_data_31)
+  current_RMSE <- sqrt(mean((new_test_data_31$Ladder.score - prediction_31)^2))
+  if (current_RMSE < minimal_RMSE){
+    minimal_RMSE <- current_RMSE
+    best_model_31 <- neural_networks
+  }
+  RMSEs_31 <- c(RMSEs_31, current_RMSE)
+}
+message("average RMSE:")
+mean(RMSEs_31)
+summary(best_model_31)
+```
+ 
+Our neural network with the best RMSE has 3 layers, 10 neurons, and 26 weights. 
+
+Now we use testing data to test our best linear model, calculate RMSE, and visualize the results in plot of actual and predicted values. 
+
+```{r neural_networks_results, echo=FALSE, warning = FALSE}
+new_column_2 <- predict(best_model_31, test_data)
+results <- data.frame(new_column_2)
+message("RMSE:")
+sqrt(mean((test_data$Ladder.score - new_column_2)^2))
+
+#plot(neural_networks)
+plot(test_data$Ladder.score, type = "l")
+lines(results$new_column_2, col = "red")
+```
+
+
+
+## Generalized Linear Model (GLM)
+
+Generalized linear model generalizes linear regression model. It allows the linear model to be related to the response variable via a link function. It unifies various other statistical regression models (logistic, Poisson, etc.).
+
+```{r glm, echo=FALSE, warning = FALSE}
+RMSEs_41 <- c()
+minimal_RMSE <- 1000000
+for(i in 1:5){
+  indexes <- which(folds == i, arr.ind = TRUE)
+  new_train_data_41 <- train_data[indexes, ]
+  new_test_data_41 <- train_data[-indexes, ]
+  glm <- train(Ladder.score ~ Logged.GDP.per.capita + Social.support +                
+                 Freedom.to.make.life.choices, data = new_train_data_41, method = "glm") 
+  prediction_41 <- predict(glm, new_test_data_41)
+  current_RMSE <- sqrt(mean((new_test_data_41$Ladder.score - prediction_41)^2))
+  if(current_RMSE < minimal_RMSE){
+    minimal_RMSE <- current_RMSE
+    best_model_41 <- glm
+  }
+  RMSEs_41 <- c(RMSEs_41, current_RMSE)
+}
+message("average RMSE:")
+mean(RMSEs_41)
+#summary(best_model_41)
+```
+Now we use testing data to test our best linear model, calculate RMSE, and visualize the results in plot of actual and predicted values.
+
+
+```{r glm_results, echo=FALSE, warning = FALSE}
+new_column_4 <- predict(best_model_41, test_data)
+results <- data.frame(new_column_4)
+message("RMSE:")
+sqrt(mean((test_data$Ladder.score - new_column_4)^2))
+
+plot(test_data$Ladder.score, type = "l")
+lines(results$new_column_4, col = "red")
+```
+
+# Results
+
+Our first goal was to reduce number of regressors as much as possible. Final model should be the most accurate and the simplest, i.e. not overfitted. Lower number of regressors allows faster training. 
+
+We used Multivariate regression for this. According to our correlation table, the feature `Healthy.life.expectancy` seemed to be significant but our later observations did not confirm that. 
+
+From our results follows that people are happier with higher GDP, social support and freedom to make life choices.
+
+
+The best method seems to be Multivariate regression but results of the remaining methods are comparable. We can see results in the following table:
+
+\begin{center}
+\begin{tabular}{|c|| c| c| c| c|}
+\hline
+Method     & MLR          & KNN         & NN           & GLM\\
+\hline
+RMSE      & 0.54   & 0.60   & 0.55    & 0.67\\
+\hline
+\end{tabular}
+\end{center}
+
+Neural networks method provides similar results as Multivariate regression. Final predictions are close to real values.
+
+\newpage
+
+# Conclusion
+
+Data were selected well. Our outcomes offer good prediction which is close to real values. Each row corresponds to one country. More data from more countries could provide better or worse predictions.
+
+All our models performed well. Results of all methods were very close to real values.
+
+In the report we used Multivariate regression, k-Nearest neighbors, Neural networks, and Generalized linear model methods.
+
+Multivariate regression has the best results. At the beginning, we did research of relationships between regressors. We used the MLR method to eliminate insignificant regressors because their number played big role.
+
+The second best method was Neural networks. This method provided good results and did not have any speed issues with our data so we did not need to rely on tuning our training objects or optimization of parameters. 
+
+It would be interesting to compare our methods on larger set of data. Maybe the Neural networks method could become a winner.
+
+There would be interesting additional project which would identify a continent based on our data of happiness, i.e. use classification methods of machine learning.
+
